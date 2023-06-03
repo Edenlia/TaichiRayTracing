@@ -55,7 +55,6 @@ def random_unit_vector() -> tm.vec3:
     return random_in_unit_sphere().normalized()
 
 
-@ti.func
 def degrees_to_radians(degrees: float) -> float:
     return degrees * math.pi / 180.0
 
@@ -280,21 +279,24 @@ class Scene:
 
 @ti.data_oriented
 class Camera:
-    def __init__(self):
-        self.aspect_ratio = aspect_ratio
-        self.viewport_height = 2.0
-        self.viewport_width = self.aspect_ratio * self.viewport_height
-        self.focal_length = 1.0
+    def __init__(self, lookfrom, lookat, vup, vfov, aspect_ratio):
+        self.theta = degrees_to_radians(vfov)
+        self.h = ti.tan(self.theta / 2)
+        self.viewport_height = 2.0 * self.h
+        self.viewport_width = aspect_ratio * self.viewport_height
 
-        self.origin = tm.vec3([0.0, 0.0, 0.0])
-        self.horizontal = tm.vec3([self.viewport_width, 0.0, 0.0])
-        self.vertical = tm.vec3([0.0, self.viewport_height, 0.0])
-        self.lower_left_corner = self.origin - self.horizontal / 2 - self.vertical / 2 - tm.vec3(
-            [0.0, 0.0, self.focal_length])
+        w = (lookfrom - lookat).normalized()
+        u = vup.cross(w).normalized()
+        v = w.cross(u)
+
+        self.origin = lookfrom
+        self.horizontal = self.viewport_width * u
+        self.vertical = self.viewport_height * v
+        self.lower_left_corner = self.origin - self.horizontal / 2 - self.vertical / 2 - w
 
     @ti.func
-    def get_ray(self, u, v):
-        return Ray(self.origin, self.lower_left_corner + u * self.horizontal + v * self.vertical - self.origin)
+    def get_ray(self, s, t):
+        return Ray(self.origin, self.lower_left_corner + s * self.horizontal + t * self.vertical - self.origin)
 
 
 # Scene
@@ -317,8 +319,18 @@ global_scene.add(sphere3)
 global_scene.add(sphere4)
 global_scene.add(sphere5)
 
+# R = tm.cos(tm.pi/4)
+# global_scene = Scene()
+# material_left = Lambertian(tm.vec3([0, 0, 1]), M_Lambertian)
+# material_right = Lambertian(tm.vec3([1, 0, 0]), M_Lambertian)
+#
+# sphere1 = Sphere(tm.vec3([-R, 0, -1]), R, material_left)
+# sphere2 = Sphere(tm.vec3([R, 0, -1]), R, material_right)
+# global_scene.add(sphere1)
+# global_scene.add(sphere2)
+
 # Camera
-camera = Camera()
+camera = Camera(tm.vec3([-2, 2, 1]), tm.vec3([0, 0, -1]), tm.vec3([0, 1, 0]), 20, aspect_ratio)
 # viewpoint_height = 2.0
 # viewpoint_width = aspect_ratio * viewpoint_height
 # focal_length = 1.0
