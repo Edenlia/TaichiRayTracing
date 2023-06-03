@@ -21,6 +21,7 @@ M_Default = -1
 M_Lambertian = 0
 M_Metal = 1
 M_Fuzz_Metal = 2
+M_Dielectric = 3
 
 
 @ti.func
@@ -71,13 +72,21 @@ def reflect(vec: tm.vec3, normal: tm.vec3) -> tm.vec3:
 
 
 @ti.func
+def refract(vec_in: tm.vec3, normal: tm.vec3, etai_over_etao):
+    cos_theta = tm.min(-vec_in.dot(normal), 1)
+    r_out_parallel = etai_over_etao * (vec_in + normal * cos_theta)
+    r_out_perp = -tm.sqrt(1.0 - r_out_parallel.norm_sqr()) * normal
+    return r_out_parallel + r_out_perp
+
+
+@ti.func
 def ray_color(ray, scene, depth) -> tm.vec3:
     pixel_color = tm.vec3([0.0, 0.0, 0.0])
     buffer_color = tm.vec3([1.0, 1.0, 1.0])
     scattered_ray = ray
     for i in range(depth):
-        is_hit, hit_p, hit_normal, hit_t, hit_material_name, hit_material_albedo = scene.hit(scattered_ray, 0.001,
-                                                                                             math.inf)
+        is_hit, hit_p, hit_normal, hit_t, hit_material_name, hit_material_albedo, front_face = \
+            scene.hit(scattered_ray, 0.001, math.inf)
         if not is_hit:
             direction = scattered_ray.direction.normalized()
             t = 0.5 * (direction[1] + 1.0)
@@ -102,6 +111,14 @@ def ray_color(ray, scene, depth) -> tm.vec3:
             scattered_ray = scatter_ray
         # target = hit_p + hit_normal + random_unit_vector()
         # scattered_ray = Ray(origin=hit_p, direction=target - hit_p)
+        elif hit_material_name == M_Dielectric:
+            is_scatter, attenuation, scatter_ray = Dielectric.scatter(scattered_ray, hit_normal, hit_p,
+                                                                      front_face)
+            if not is_scatter:
+                pixel_color = tm.vec3([0.0, 0.0, 0.0])
+                break
+            buffer_color *= attenuation
+            scattered_ray = scatter_ray
     return pixel_color
 
 
@@ -185,7 +202,49 @@ class Metal(Material):  # material 2
         return is_scatter, attenuation, scattered
 
     def get_material_info(self):
-        return {'albedo': self.albedo, 'fuzz': self.fuzz, 'name': self.name}
+        return {'albedo': self.albedo, 'name': self.name}
+
+
+@ti.data_oriented
+class Dielectric(Material):
+    def __init__(self, name):
+        self.name = name
+        self.albedo = tm.vec3([1.0, 1.0, 1.0])
+
+    @staticmethod
+    @ti.func
+    def scatter(ray_in, hit_normal, hit_p, front_face):
+        etai_over_etao = 1.5
+        attenuation = tm.vec3([1.0, 1.0, 1.0])
+        reflection_ratio = etai_over_etao
+        if front_face:
+            reflection_ratio = 1.0 / reflection_ratio
+        unit_direction = ray_in.normalized_direction()
+        cos_theta = tm.min(-unit_direction.dot(hit_normal), 1.0)
+        sin_theta = ti.sqrt(1.0 - cos_theta * cos_theta)
+        is_scatter = False
+        next_direction = tm.vec3([0.0, 0.0, 0.0])
+        if reflection_ratio * sin_theta > 1.0 or Dielectric.reflectance(cos_theta, reflection_ratio) > ti.random():
+            reflected = reflect(unit_direction, hit_normal)
+            next_direction = reflected
+            is_scatter = True
+        else:
+            refracted = refract(unit_direction, hit_normal, reflection_ratio)
+            next_direction = refracted
+            is_scatter = True
+
+        scattered = Ray(origin=hit_p, direction=next_direction)
+        return is_scatter, attenuation, scattered
+
+    def get_material_info(self):
+        return {'albedo': self.albedo, 'name': self.name}
+
+    @staticmethod
+    @ti.func
+    def reflectance(cosine, ref_idx):
+        r0 = (1 - ref_idx) / (1 + ref_idx)
+        r0 = r0 * r0
+        return r0 + (1 - r0) * ti.pow((1 - cosine), 5)
 
 
 @ti.data_oriented
@@ -202,8 +261,9 @@ class Scene:
         closest_so_far = t_max
         closest_p, closest_normal = tm.vec3([0.0, 0.0, 0.0]), tm.vec3([0.0, 0.0, 0.0])
         closest_material_name, closest_material_albedo = M_Default, tm.vec3([0.0, 0.0, 0.0])
+        closest_front_face = True
         for i in ti.static(range(len(self.objList))):
-            is_hit, hit_p, hit_normal, hit_t, hit_material_name, hit_material_albedo = self.objList[i].hit(ray, t_min,
+            is_hit, hit_p, hit_normal, hit_t, hit_material_name, hit_material_albedo, front_face = self.objList[i].hit(ray, t_min,
                                                                                                            closest_so_far)
             if is_hit:
                 hit_anything = True
@@ -212,8 +272,10 @@ class Scene:
                 closest_normal = hit_normal
                 closest_material_name = hit_material_name
                 closest_material_albedo = hit_material_albedo
+                closest_front_face = front_face
         # print(hit_material_name, hit_material_albedo)
-        return hit_anything, closest_p, closest_normal, closest_so_far, closest_material_name, closest_material_albedo
+        return hit_anything, closest_p, closest_normal, closest_so_far, \
+            closest_material_name, closest_material_albedo, closest_front_face
 
 
 @ti.data_oriented
@@ -238,18 +300,22 @@ class Camera:
 # Scene
 material_ground = Lambertian(tm.vec3([0.8, 0.8, 0.0]), M_Lambertian)
 material_center = Lambertian(tm.vec3([0.7, 0.3, 0.3]), M_Lambertian)
-material_left = Metal(tm.vec3([0.8, 0.8, 0.8]), M_Metal)
+# material_center = Dielectric(M_Dielectric)
+material_left = Dielectric(M_Dielectric)
+# material_left = Metal(tm.vec3([0.8, 0.8, 0.8]), M_Metal)
 material_right = Metal(tm.vec3([0.8, 0.6, 0.2]), M_Metal)
 
 sphere1 = Sphere(tm.vec3([0, -100.5, -1]), 100, material_ground)
 sphere2 = Sphere(tm.vec3([0, 0, -1]), 0.5, material_center)
 sphere3 = Sphere(tm.vec3([-1, 0, -1]), 0.5, material_left)
 sphere4 = Sphere(tm.vec3([1, 0, -1]), 0.5, material_right)
+sphere5 = Sphere(tm.vec3([-1, 0, -1]), -0.4, material_left)
 global_scene = Scene()
 global_scene.add(sphere1)
 global_scene.add(sphere2)
 global_scene.add(sphere3)
 global_scene.add(sphere4)
+global_scene.add(sphere5)
 
 # Camera
 camera = Camera()

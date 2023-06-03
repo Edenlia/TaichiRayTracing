@@ -51,7 +51,7 @@ class Sphere(Hittable):
         if not front_face:
             hit_normal = -outward_normal
 
-        return is_hit, hit_p, hit_normal, hit_t, hit_material_name, hit_material_albedo
+        return is_hit, hit_p, hit_normal, hit_t, hit_material_name, hit_material_albedo, front_face
 
 
 
