@@ -3,12 +3,13 @@ import taichi.math as tm
 import math
 from ray import Ray
 from polygone import Sphere
+import random
 import numpy as np
 
 ti.init(arch=ti.gpu)
 
-aspect_ratio = 16.0 / 9.0
-width = 960
+aspect_ratio = 3.0 / 2.0
+width = 1200
 height = int(width / aspect_ratio)
 samples_per_pixel = 100
 max_depth = 50
@@ -47,6 +48,17 @@ def random_in_unit_sphere() -> tm.vec3:
     p = random_vec3(-1.0, 1.0)
     while p.norm() >= 1.0:
         p = random_vec3(-1.0, 1.0)
+    return p
+
+
+@ti.func
+def random_in_unit_disk() -> tm.vec3:
+    p = tm.vec3([10, 10, 10])
+    while True:
+        p = tm.vec3([ti.random() * 2.0 - 1.0, ti.random() * 2.0 - 1.0, 0.0])
+        if p.norm() < 1.0:
+            break
+    print(p)
     return p
 
 
@@ -141,14 +153,14 @@ def write_color(pixel_color: tm.vec3, samples_per_pixel: int):
 
 
 @ti.kernel
-def render(scene: ti.template()):
+def render(scene: ti.template(), camera: ti.template()):
     for i, j in canvas:
         pixel_color = tm.vec3([0.0, 0.0, 0.0])
         for s in range(samples_per_pixel):
             u = (i + ti.random(dtype=ti.f32)) / width
             v = (j + ti.random(dtype=ti.f32)) / height
-            ray = Ray(origin=camera.origin,
-                      direction=camera.lower_left_corner + u * camera.horizontal + v * camera.vertical - camera.origin)
+
+            ray = camera.get_ray(u, v)
 
             pixel_color += ray_color(ray, scene, max_depth)
 
@@ -262,8 +274,9 @@ class Scene:
         closest_material_name, closest_material_albedo = M_Default, tm.vec3([0.0, 0.0, 0.0])
         closest_front_face = True
         for i in ti.static(range(len(self.objList))):
-            is_hit, hit_p, hit_normal, hit_t, hit_material_name, hit_material_albedo, front_face = self.objList[i].hit(ray, t_min,
-                                                                                                           closest_so_far)
+            is_hit, hit_p, hit_normal, hit_t, hit_material_name, hit_material_albedo, front_face = self.objList[i].hit(
+                ray, t_min,
+                closest_so_far)
             if is_hit:
                 hit_anything = True
                 closest_so_far = hit_t
@@ -279,45 +292,85 @@ class Scene:
 
 @ti.data_oriented
 class Camera:
-    def __init__(self, lookfrom, lookat, vup, vfov, aspect_ratio):
+    def __init__(self, lookfrom, lookat, vup, vfov, aspect_ratio, aperture, focus_dist):
         self.theta = degrees_to_radians(vfov)
         self.h = ti.tan(self.theta / 2)
         self.viewport_height = 2.0 * self.h
         self.viewport_width = aspect_ratio * self.viewport_height
 
-        w = (lookfrom - lookat).normalized()
-        u = vup.cross(w).normalized()
-        v = w.cross(u)
+        self.w = (lookfrom - lookat).normalized()
+        self.u = vup.cross(self.w).normalized()
+        self.v = self.w.cross(self.u)
 
         self.origin = lookfrom
-        self.horizontal = self.viewport_width * u
-        self.vertical = self.viewport_height * v
-        self.lower_left_corner = self.origin - self.horizontal / 2 - self.vertical / 2 - w
+        self.horizontal = focus_dist * self.viewport_width * self.u
+        self.vertical = focus_dist * self.viewport_height * self.v
+        self.lower_left_corner = self.origin - self.horizontal / 2 - self.vertical / 2 - focus_dist * self.w
+
+        self.lens_radius = aperture / 2
 
     @ti.func
     def get_ray(self, s, t):
-        return Ray(self.origin, self.lower_left_corner + s * self.horizontal + t * self.vertical - self.origin)
+        rd = self.lens_radius * random_in_unit_disk()
+        offset = self.u * rd.x + self.v * rd.y
+        print(offset)
+        return Ray(self.origin + offset,
+                   self.lower_left_corner + s * self.horizontal + t * self.vertical - self.origin - offset)
 
 
-# Scene
-material_ground = Lambertian(tm.vec3([0.8, 0.8, 0.0]), M_Lambertian)
-material_center = Lambertian(tm.vec3([0.7, 0.3, 0.3]), M_Lambertian)
-# material_center = Dielectric(M_Dielectric)
-material_left = Dielectric(M_Dielectric)
-# material_left = Metal(tm.vec3([0.8, 0.8, 0.8]), M_Metal)
-material_right = Metal(tm.vec3([0.8, 0.6, 0.2]), M_Metal)
+def random_scene():
+    scene = Scene()
+    scene.add(Sphere(tm.vec3([0, -1000, 0]), 1000, Lambertian(tm.vec3([0.5, 0.5, 0.5]), M_Lambertian)))
+    number = 3
+    distance = 0.9
+    for a in range(-number, number):
+        for b in range(-number, number):
+            choose_mat = random.random()
+            center = tm.vec3([a + distance * random.random(), 0.2, b + distance * random.random()])
+            if (center - tm.vec3([4, 0.2, 0])).norm() > 0.9:
+                if choose_mat < 0.8:
+                    # diffuse
+                    albedo = tm.vec3([random.random() * random.random(), random.random() * random.random(),
+                                      random.random() * random.random()])
+                    sphere_material = Lambertian(albedo, M_Lambertian)
+                    scene.add(Sphere(center, 0.2, sphere_material))
+                elif choose_mat < 0.95:
+                    # metal
+                    albedo = tm.vec3(
+                        [0.5 * (1 + random.random()), 0.5 * (1 + random.random()), 0.5 * (1 + random.random())])
+                    sphere_material = Metal(albedo, M_Metal)
+                    scene.add(Sphere(center, 0.2, sphere_material))
+                else:
+                    # glass
+                    sphere_material = Dielectric(M_Dielectric)
+                    scene.add(Sphere(center, 0.2, sphere_material))
+    scene.add(Sphere(tm.vec3([0, 1, 0]), 1.0, Dielectric(M_Dielectric)))
+    scene.add(Sphere(tm.vec3([-4, 1, 0]), 1.0, Lambertian(tm.vec3([0.4, 0.2, 0.1]), M_Lambertian)))
+    scene.add(Sphere(tm.vec3([4, 1, 0]), 1.0, Metal(1.0, M_Metal)))
+    return scene
 
-sphere1 = Sphere(tm.vec3([0, -100.5, -1]), 100, material_ground)
-sphere2 = Sphere(tm.vec3([0, 0, -1]), 0.5, material_center)
-sphere3 = Sphere(tm.vec3([-1, 0, -1]), 0.5, material_left)
-sphere4 = Sphere(tm.vec3([1, 0, -1]), 0.5, material_right)
-sphere5 = Sphere(tm.vec3([-1, 0, -1]), -0.4, material_left)
-global_scene = Scene()
-global_scene.add(sphere1)
-global_scene.add(sphere2)
-global_scene.add(sphere3)
-global_scene.add(sphere4)
-global_scene.add(sphere5)
+
+# # Scene
+# material_ground = Lambertian(tm.vec3([0.8, 0.8, 0.0]), M_Lambertian)
+# material_center = Lambertian(tm.vec3([0.7, 0.3, 0.3]), M_Lambertian)
+# # material_center = Dielectric(M_Dielectric)
+# material_left = Dielectric(M_Dielectric)
+# # material_left = Metal(tm.vec3([0.8, 0.8, 0.8]), M_Metal)
+# material_right = Metal(tm.vec3([0.8, 0.6, 0.2]), M_Metal)
+#
+# sphere1 = Sphere(tm.vec3([0, -100.5, -1]), 100, material_ground)
+# sphere2 = Sphere(tm.vec3([0, 0, -1]), 0.5, material_center)
+# sphere3 = Sphere(tm.vec3([-1, 0, -1]), 0.5, material_left)
+# sphere4 = Sphere(tm.vec3([1, 0, -1]), 0.5, material_right)
+# sphere5 = Sphere(tm.vec3([-1, 0, -1]), -0.4, material_left)
+# global_scene = Scene()
+# global_scene.add(sphere1)
+# global_scene.add(sphere2)
+# global_scene.add(sphere3)
+# global_scene.add(sphere4)
+# global_scene.add(sphere5)
+
+global_scene = random_scene()
 
 # R = tm.cos(tm.pi/4)
 # global_scene = Scene()
@@ -330,7 +383,14 @@ global_scene.add(sphere5)
 # global_scene.add(sphere2)
 
 # Camera
-camera = Camera(tm.vec3([-2, 2, 1]), tm.vec3([0, 0, -1]), tm.vec3([0, 1, 0]), 20, aspect_ratio)
+lookfrom = tm.vec3([13, 2, 3])
+lookat = tm.vec3([0, 0, 0])
+vup = tm.vec3([0, 1, 0])
+vfov = 20
+aperture = 0.1
+focus_dist = 10
+
+camera = Camera(lookfrom, lookat, vup, vfov, aspect_ratio, aperture, focus_dist)
 # viewpoint_height = 2.0
 # viewpoint_width = aspect_ratio * viewpoint_height
 # focal_length = 1.0
@@ -341,8 +401,10 @@ camera = Camera(tm.vec3([-2, 2, 1]), tm.vec3([0, 0, -1]), tm.vec3([0, 1, 0]), 20
 # lower_left_corner = origin - horizontal / 2 - vertical / 2 - tm.vec3([0.0, 0.0, focal_length])
 
 while gui.running:
-    render(global_scene)
+    render(global_scene, camera)
     gui.set_image(canvas)
     gui.show()
     while True:
         pass
+
+## TODO: If the sphere number is too large, the image will be black. Why?

@@ -39,4 +39,6 @@ def test():
 
 
 if __name__ == '__main__':
-    test()
+    a = tm.vec3(1, 2, 3)
+
+    print(a.x, a.y, a.z)
